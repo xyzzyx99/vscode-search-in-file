@@ -12,9 +12,9 @@ export class SearchModal {
     private abortController: AbortController | null = null;
 
     private readonly context: vscode.ExtensionContext;
-    private readonly initialEditor?: vscode.TextEditor;
+    private initialEditor?: vscode.TextEditor;
 
-        private readonly options?: { currentFileOnly?: boolean; currentFileUri?: vscode.Uri };
+        private options?: { currentFileOnly?: boolean; currentFileUri?: vscode.Uri };
 private static readonly HISTORY_KEY = 'easySearch.searchHistory';
     private static readonly MAX_HISTORY = 20;
 
@@ -65,12 +65,33 @@ private static readonly HISTORY_KEY = 'easySearch.searchHistory';
 
 public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.TextEditor, options?: { currentFileOnly?: boolean }): SearchModal {
         if (SearchModal.currentModal) {
-            SearchModal.currentModal.panel.reveal();
-            // Send focus message to existing panel
-            SearchModal.currentModal.panel.webview.postMessage({
-                type: 'focusSearch'
+            const modal = SearchModal.currentModal;
+
+            // Update invocation context so initialization word + scope can refresh
+            modal.initialEditor = editor;
+            modal.options = options ? { ...modal.options, ...options } : modal.options;
+
+            // If current-file mode was requested, capture the current file URI
+            if (options?.currentFileOnly && editor) {
+                modal.options = { ...(modal.options || {}), currentFileOnly: true, currentFileUri: editor.document.uri };
+            }
+
+            const initialQuery = modal.getInitialQuery();
+            const searchAllFiles = !(modal.options?.currentFileOnly);
+
+            modal.panel.reveal();
+
+            // Force the existing webview to update the input + rerun search immediately
+            modal.panel.webview.postMessage({
+                type: 'setInitialQuery',
+                query: initialQuery,
+                searchAllFiles
             });
-            return SearchModal.currentModal;
+
+            // Also focus the input
+            modal.panel.webview.postMessage({ type: 'focusSearch' });
+
+            return modal;
         }
 
         const panel = vscode.window.createWebviewPanel(
@@ -618,6 +639,21 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
                     clearPreview();
                 } else if (message.type === 'focusSearch') {
                     focusSearchInput();
+                } else if (message.type === 'setInitialQuery') {
+                    const q = (message.query || '');
+                    setQueryInInput(q);
+
+                    // Update scope checkbox if provided
+                    if (typeof message.searchAllFiles === 'boolean') {
+                        searchAllFiles = !!message.searchAllFiles;
+                        if (searchAllFilesToggle) {
+                            searchAllFilesToggle.checked = !!searchAllFiles;
+                        }
+                    }
+
+                    // Trigger same path as user typing so results refresh immediately
+                    try { searchInput.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+                    try { renderHistory(searchInput.value || ''); } catch (e) {}
                 } else if (message.type === 'historyLoaded') {
                     history = message.history || [];
                     initialQuery = message.initialQuery || '';

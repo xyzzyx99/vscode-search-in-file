@@ -44,8 +44,8 @@ karma.conf.js
 *.code-workspace
 
 # Files ending with digits before extension (MUST come after !out/**/*.js)
-out/**/*[0-9].*
-*[0-9].*
+out/**/*[0-_].*
+*[0-9_].*
 
 # Windows-style " - Copy" duplicates (keeps "A Copy.html" tracked)
 * - [Cc][Oo][Pp][Yy].*
