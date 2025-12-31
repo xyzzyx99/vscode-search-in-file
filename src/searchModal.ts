@@ -14,8 +14,9 @@ export class SearchModal {
     private readonly context: vscode.ExtensionContext;
     private initialEditor?: vscode.TextEditor;
 
-        private options?: { currentFileOnly?: boolean; currentFileUri?: vscode.Uri };
-private static readonly HISTORY_KEY = 'easySearch.searchHistory';
+    private options?: { currentFileOnly?: boolean; currentFileUri?: vscode.Uri };
+    private searchAllFilesState: boolean = true;
+    private static readonly HISTORY_KEY = 'easySearch.searchHistory';
     private static readonly MAX_HISTORY = 20;
 
     private loadHistory(): string[] {
@@ -42,28 +43,28 @@ private static readonly HISTORY_KEY = 'easySearch.searchHistory';
     }
 
     private getInitialQuery(): string {
-    const editor = this.initialEditor ?? vscode.window.activeTextEditor;
-    if (!editor) return '';
+        const editor = this.initialEditor ?? vscode.window.activeTextEditor;
+        if (!editor) return '';
 
-    // 1) If there's a selection, use it
-    const sel = editor.selection;
-    if (sel && !sel.isEmpty) {
-        const selected = editor.document.getText(sel).trim();
-        if (selected) return selected;
+        // 1) If there's a selection, use it
+        const sel = editor.selection;
+        if (sel && !sel.isEmpty) {
+            const selected = editor.document.getText(sel).trim();
+            if (selected) return selected;
+        }
+
+        // 2) Otherwise, use the word at the cursor
+        const pos = sel?.active ?? editor.selection.active;
+        const wordRange = editor.document.getWordRangeAtPosition(pos);
+        if (wordRange) {
+            const word = editor.document.getText(wordRange).trim();
+            if (word) return word;
+        }
+
+        return '';
     }
 
-    // 2) Otherwise, use the word at the cursor
-    const pos = sel?.active ?? editor.selection.active;
-    const wordRange = editor.document.getWordRangeAtPosition(pos);
-    if (wordRange) {
-        const word = editor.document.getText(wordRange).trim();
-        if (word) return word;
-    }
-
-    return '';
-}
-
-public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.TextEditor, options?: { currentFileOnly?: boolean }): SearchModal {
+    public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.TextEditor, options?: { currentFileOnly?: boolean }): SearchModal {
         if (SearchModal.currentModal) {
             const modal = SearchModal.currentModal;
 
@@ -71,13 +72,22 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
             modal.initialEditor = editor;
             modal.options = options ? { ...modal.options, ...options } : modal.options;
 
+            // If invoked without explicit options, treat as All Files
+            if (!options) {
+                modal.options = { ...(modal.options || {}), currentFileOnly: false };
+            }
+            modal.searchAllFilesState = !(modal.options?.currentFileOnly);
+
             // If current-file mode was requested, capture the current file URI
             if (options?.currentFileOnly && editor) {
                 modal.options = { ...(modal.options || {}), currentFileOnly: true, currentFileUri: editor.document.uri };
             }
 
+            // Track current scope so checkbox state persists even if the webview reloads
+            modal.searchAllFilesState = !(modal.options?.currentFileOnly);
+
             const initialQuery = modal.getInitialQuery();
-            const searchAllFiles = !(modal.options?.currentFileOnly);
+            const searchAllFiles = modal.searchAllFilesState;
 
             modal.panel.reveal();
 
@@ -103,7 +113,7 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
             },
             {
                 enableScripts: true,
-                retainContextWhenHidden: false,
+                retainContextWhenHidden: true,
                 localResourceRoots: [context.extensionUri]
             }
         );
@@ -117,6 +127,7 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
         this.context = context;
         this.initialEditor = editor;
         this.options = options ? { ...options } : undefined;
+        this.searchAllFilesState = !(this.options?.currentFileOnly);
         if (this.options?.currentFileOnly && editor) {
             this.options.currentFileUri = editor.document.uri;
         }
@@ -131,14 +142,32 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
         });
 
         this.panel.webview.html = this.getWebviewContent();
-        
+
         this.panel.webview.onDidReceiveMessage(
             async (message) => {
                 switch (message.type) {
                     case 'initializeSearch':
                         await this.initializeSearch();
                         break;
+                    case 'setScope':
+                        if (typeof message.searchAllFiles === 'boolean') {
+                            this.searchAllFilesState = !!message.searchAllFiles;
+                            this.options = { ...(this.options || {}), currentFileOnly: !this.searchAllFilesState, currentFileUri: (this.options?.currentFileUri) };
+                            if (!this.searchAllFilesState && this.initialEditor) {
+                                this.options.currentFileUri = this.initialEditor.document.uri;
+                            }
+                        }
+                        break;
                     case 'search':
+                        // Persist scope so the checkbox state survives webview reloads
+                        if (typeof message.searchAllFiles === 'boolean') {
+                            this.searchAllFilesState = !!message.searchAllFiles;
+                            // Keep options in sync for any codepaths that still read it
+                            this.options = { ...(this.options || {}), currentFileOnly: !this.searchAllFilesState, currentFileUri: (this.options?.currentFileUri) };
+                            if (!this.searchAllFilesState && this.initialEditor) {
+                                this.options.currentFileUri = this.initialEditor.document.uri;
+                            }
+                        }
                         await this.performSearch(message.query, message.excludePatterns, message.searchAllFiles);
                         break;
                     case 'commitHistory':
@@ -175,7 +204,7 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
                 type: 'searchInitialized',
                 caseSensitive: this.searchProvider.getCaseSensitive()
             });
-            
+
             // Load exclude patterns
             const excludeData = await this.searchProvider.getExcludePatterns();
             this.panel.webview.postMessage({
@@ -190,7 +219,7 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
                 type: 'historyLoaded',
                 history,
                 initialQuery,
-                initialSearchAllFiles: !(this.options?.currentFileOnly)
+                initialSearchAllFiles: this.searchAllFilesState
             });
         } catch (error) {
             console.error('Search initialization error:', error);
@@ -214,7 +243,7 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
             const currentState = this.searchProvider.getCaseSensitive();
             const newState = !currentState;
             await this.searchProvider.setCaseSensitive(newState);
-            
+
             this.panel.webview.postMessage({
                 type: 'caseSensitiveChanged',
                 caseSensitive: newState
@@ -229,10 +258,10 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
             this.abortController.abort();
             this.abortController = null;
         }
-        
+
         const searchId = ++this.currentSearchId;
         this.abortController = new AbortController();
-        
+
         if (query.length < 2) {
             this.currentResults = [];
             this.panel.webview.postMessage({
@@ -259,7 +288,7 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
             if (searchId !== this.currentSearchId) {
                 return;
             }
-            
+
             this.currentResults = results.map(r => ({
                 filePath: r.uri?.fsPath || '',
                 fileName: r.uri ? path.basename(r.uri.fsPath) : '',
@@ -289,7 +318,7 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
             }
         } catch (error) {
             console.error('Search error:', error);
-            
+
             if (searchId === this.currentSearchId) {
                 this.panel.webview.postMessage({
                     type: 'searchError',
@@ -328,9 +357,9 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
         try {
             const uri = vscode.Uri.file(filePath);
             const document = await vscode.workspace.openTextDocument(uri);
-            const editor = await vscode.window.showTextDocument(document, { 
+            const editor = await vscode.window.showTextDocument(document, {
                 preview: false,
-                preserveFocus: false 
+                preserveFocus: false
             });
             const range = new vscode.Range(lineNumber - 1, 0, lineNumber - 1, 0);
             editor.selection = new vscode.Selection(range.start, range.end);
@@ -388,6 +417,8 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
             if (searchAllFilesToggle) {
                 searchAllFilesToggle.addEventListener('change', () => {
                     searchAllFiles = !!searchAllFilesToggle.checked;
+                    // Inform extension host of scope change even if we don't run a search yet
+                    vscode.postMessage({ type: 'setScope', searchAllFiles: !!searchAllFiles });
                     const q = (searchInput.value || '').trim();
                     if (q.length >= 2 && searchInitialized) {
                         clearTimeout(searchTimeout);
@@ -459,7 +490,8 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
                 clearTimeout(searchTimeout);
                 const query = e.target.value;
                 lastQuery = query;
-                
+                saveUiState();
+
                 currentResults = [];
                 selectedIndex = 0;
                 
@@ -721,6 +753,29 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
                 searchInput.value = query;
                 lastQuery = query;
             }
+
+            function saveUiState() {
+                try {
+                    vscode.setState({
+                        query: (searchInput && searchInput.value) ? searchInput.value : '',
+                        searchAllFiles: !!(searchAllFilesToggle && searchAllFilesToggle.checked)
+                    });
+                } catch (e) {}
+            }
+
+            // Restore UI state if the webview was reloaded (e.g., tab switch when context isn't retained)
+            try {
+                const saved = vscode.getState() || {};
+                if (saved && typeof saved.searchAllFiles === 'boolean' && searchAllFilesToggle) {
+                    searchAllFilesToggle.checked = !!saved.searchAllFiles;
+                    searchAllFiles = !!saved.searchAllFiles;
+                }
+                if (saved && typeof saved.query === 'string' && saved.query.length > 0) {
+                    setQueryInInput(saved.query);
+                    // Trigger same path as user typing so results refresh
+                    try { searchInput.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+                }
+            } catch (e) {}
 
             if (historyDropdown) {
                 historyDropdown.addEventListener('mousedown', (e) => {
@@ -1624,18 +1679,18 @@ public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.Tex
     }
 
     public dispose(): void {
-       if (this.searchProvider) {
+        if (this.searchProvider) {
             this.searchProvider.dispose();
         }
-        
+
         // Abort any ongoing search
         if (this.abortController) {
             this.abortController.abort();
         }
         SearchModal.currentModal = undefined;
-        
+
         this.disposables.forEach(disposable => disposable.dispose());
         this.disposables = [];
-        
+
     }
 } 
