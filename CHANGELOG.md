@@ -7,7 +7,7 @@ All notable changes to the "EasySearch - Search in Files" extension will be docu
 ### Added
 - Context menu
 - History list
-- Use selection and word at cursor for initial search-
+- Use selection and word at cursor for initial search
 
 ## [1.0.1] - 2025-06-10
 
