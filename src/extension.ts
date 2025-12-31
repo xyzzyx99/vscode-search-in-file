@@ -2,11 +2,17 @@ import * as vscode from 'vscode';
 import { SearchModal } from './searchModal';
 
 export function activate(context: vscode.ExtensionContext) {
-    const searchCommand = vscode.commands.registerCommand('easySearch.searchInFiles', async () => {
-        SearchModal.createOrShow(context);
+    const searchInFiles = vscode.commands.registerCommand('easySearch.searchInFiles', async () => {
+        const editor = vscode.window.activeTextEditor;
+        SearchModal.createOrShow(context, editor);
     });
-    
-    context.subscriptions.push(searchCommand);
+
+    const searchInCurrentFile = vscode.commands.registerCommand('easySearch.searchInCurrentFile', async () => {
+        const editor = vscode.window.activeTextEditor;
+        SearchModal.createOrShow(context, editor, { currentFileOnly: true });
+    });
+
+    context.subscriptions.push(searchInFiles, searchInCurrentFile);
 }
 
-export function deactivate() {} 
+export function deactivate() {}

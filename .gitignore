@@ -56,3 +56,39 @@ coverage/
 # Temporary files
 tmp/
 temp/
+
+*.zip
+*.vsix
+
+# VS Code
+.vscode/
+.history/
+[Nn]ew [Ff]older*/
+*.code-workspace
+
+# Files ending with digits before extension: popup1.html, popup12.js, etc.
+*[0-9].*
+
+# Windows-style " - Copy" duplicates (keeps "A Copy.html" tracked)
+* - [Cc][Oo][Pp][Yy].*
+* - [Cc][Oo][Pp][Yy][0-9].*
+* - [Cc][Oo][Pp][Yy][0-9]*.*
+
+# Suffix "Copy" stuck to basename: popupCopy.js, popupcopy2.html
+*[![:space:]][Cc][Oo][Pp][Yy].*
+*[![:space:]][Cc][Oo][Pp][Yy][0-9]*.*
+
+# =========================
+# VS Code
+# =========================
+.vscode/
+.history/
+*.code-workspace
+
+# =========================
+# OS junk
+# =========================
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini

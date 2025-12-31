@@ -11,7 +11,59 @@ export class SearchModal {
     private currentSearchId: number = 0;
     private abortController: AbortController | null = null;
 
-    public static createOrShow(context: vscode.ExtensionContext): SearchModal {
+    private readonly context: vscode.ExtensionContext;
+    private readonly initialEditor?: vscode.TextEditor;
+
+        private readonly options?: { currentFileOnly?: boolean; currentFileUri?: vscode.Uri };
+private static readonly HISTORY_KEY = 'easySearch.searchHistory';
+    private static readonly MAX_HISTORY = 20;
+
+    private loadHistory(): string[] {
+        return this.context.globalState.get<string[]>(SearchModal.HISTORY_KEY, []);
+    }
+
+    private async saveHistory(history: string[]): Promise<void> {
+        await this.context.globalState.update(
+            SearchModal.HISTORY_KEY,
+            history.slice(0, SearchModal.MAX_HISTORY)
+        );
+    }
+
+    private async addToHistory(query: string): Promise<void> {
+        const q = (query ?? '').trim();
+        if (!q) return;
+
+        const history = this.loadHistory();
+        const next = [q, ...history.filter(x => x !== q)];
+        await this.saveHistory(next);
+
+        // Push update to webview so it can refresh the list immediately
+        this.panel.webview.postMessage({ type: 'historyUpdated', history: next });
+    }
+
+    private getInitialQuery(): string {
+    const editor = this.initialEditor ?? vscode.window.activeTextEditor;
+    if (!editor) return '';
+
+    // 1) If there's a selection, use it
+    const sel = editor.selection;
+    if (sel && !sel.isEmpty) {
+        const selected = editor.document.getText(sel).trim();
+        if (selected) return selected;
+    }
+
+    // 2) Otherwise, use the word at the cursor
+    const pos = sel?.active ?? editor.selection.active;
+    const wordRange = editor.document.getWordRangeAtPosition(pos);
+    if (wordRange) {
+        const word = editor.document.getText(wordRange).trim();
+        if (word) return word;
+    }
+
+    return '';
+}
+
+public static createOrShow(context: vscode.ExtensionContext, editor?: vscode.TextEditor, options?: { currentFileOnly?: boolean }): SearchModal {
         if (SearchModal.currentModal) {
             SearchModal.currentModal.panel.reveal();
             // Send focus message to existing panel
@@ -35,13 +87,19 @@ export class SearchModal {
             }
         );
 
-        SearchModal.currentModal = new SearchModal(panel, context);
+        SearchModal.currentModal = new SearchModal(panel, context, editor, options);
         return SearchModal.currentModal;
     }
 
-    private constructor(panel: vscode.WebviewPanel, context: vscode.ExtensionContext) {
+    private constructor(panel: vscode.WebviewPanel, context: vscode.ExtensionContext, editor?: vscode.TextEditor, options?: { currentFileOnly?: boolean }) {
         this.panel = panel;
-        this.searchProvider = new SearchProvider(context);
+        this.context = context;
+        this.initialEditor = editor;
+        this.options = options ? { ...options } : undefined;
+        if (this.options?.currentFileOnly && editor) {
+            this.options.currentFileUri = editor.document.uri;
+        }
+        this.searchProvider = new SearchProvider(context, this.options);
 
         this.searchProvider.setProgressCallback((message: string, progress?: number) => {
             this.panel.webview.postMessage({
@@ -60,7 +118,10 @@ export class SearchModal {
                         await this.initializeSearch();
                         break;
                     case 'search':
-                        await this.performSearch(message.query, message.excludePatterns);
+                        await this.performSearch(message.query, message.excludePatterns, message.searchAllFiles);
+                        break;
+                    case 'commitHistory':
+                        await this.addToHistory(message.query);
                         break;
                     case 'toggleCaseSensitive':
                         await this.toggleCaseSensitive();
@@ -100,6 +161,16 @@ export class SearchModal {
                 type: 'excludePatternsLoaded',
                 data: excludeData
             });
+
+            // Load history + initialize query in the webview
+            const history = this.loadHistory();
+            const initialQuery = this.getInitialQuery();
+            this.panel.webview.postMessage({
+                type: 'historyLoaded',
+                history,
+                initialQuery,
+                initialSearchAllFiles: !(this.options?.currentFileOnly)
+            });
         } catch (error) {
             console.error('Search initialization error:', error);
             this.panel.webview.postMessage({
@@ -132,7 +203,7 @@ export class SearchModal {
         }
     }
 
-    private async performSearch(query: string, excludePatterns: string[] = []): Promise<void> {
+    private async performSearch(query: string, excludePatterns: string[] = [], searchAllFiles?: boolean): Promise<void> {
         if (this.abortController) {
             this.abortController.abort();
             this.abortController = null;
@@ -156,7 +227,14 @@ export class SearchModal {
         }
 
         try {
-            const results = await this.searchProvider.search(query, this.abortController.signal);
+            const effectiveSearchAllFiles = (searchAllFiles !== undefined)
+                ? !!searchAllFiles
+                : !(this.options?.currentFileOnly);
+
+            const results = await this.searchProvider.search(query, this.abortController.signal, {
+                currentFileOnly: !effectiveSearchAllFiles,
+                currentFileUri: this.options?.currentFileUri ?? this.initialEditor?.document.uri
+            });
             if (searchId !== this.currentSearchId) {
                 return;
             }
@@ -249,18 +327,53 @@ export class SearchModal {
             const previewHeader = document.querySelector('.preview-header');
             const previewContent = document.querySelector('.preview-content');
             const resultsCount = document.querySelector('.results-count');
+            const searchAllFilesToggle = document.getElementById('searchAllFilesToggle');
+            const historyDropdown = document.getElementById('historyDropdown');
             
             let searchTimeout;
             let focusTimeouts = [];
             let currentResults = [];
+            let currentResultsCount = 0;
+                        let lastCommittedQuery = '';
+                        let commitTimer = null;
+            
+                        function commitHistoryIfNeeded() {
+                            const q = (searchInput && searchInput.value ? searchInput.value : '').trim();
+                            if (q.length < 2) return;
+                            if (currentResultsCount <= 0) return;
+                            if (q === lastCommittedQuery) return;
+                            lastCommittedQuery = q;
+                            vscode.postMessage({ type: 'commitHistory', query: q });
+                        }
+            
+                        function scheduleCommitHistory() {
+                            if (commitTimer) clearTimeout(commitTimer);
+                            commitTimer = setTimeout(() => {
+                                commitHistoryIfNeeded();
+                            }, 200);
+                        }
             let selectedIndex = 0;
             let currentSearchId = 0;
+            let searchAllFiles = true;
             let isSearching = false;
             let searchInitialized = false;
             let caseSensitive = false;
             let lastQuery = '';
+            let history = [];
+            let initialQuery = '';
             let excludePatterns = [];
             let excludeEnabled = false;
+
+            if (searchAllFilesToggle) {
+                searchAllFilesToggle.addEventListener('change', () => {
+                    searchAllFiles = !!searchAllFilesToggle.checked;
+                    const q = (searchInput.value || '').trim();
+                    if (q.length >= 2 && searchInitialized) {
+                        clearTimeout(searchTimeout);
+                        searchTimeout = setTimeout(() => performNewSearch(), 50);
+                    }
+                });
+            }
             
             const caseSensitiveBtn = document.querySelector('.case-sensitive-btn');
             const excludeInput = document.querySelector('.exclude-input');
@@ -268,6 +381,24 @@ export class SearchModal {
             
             showProgress('Initializing search index...');
             vscode.postMessage({ type: 'initializeSearch' });
+
+            // Commit search query to history only after user interacts with results/preview.
+            if (resultsContainer) {
+                resultsContainer.addEventListener('scroll', () => {
+                    scheduleCommitHistory();
+                }, { passive: true });
+                resultsContainer.addEventListener('mousedown', () => {
+                    commitHistoryIfNeeded();
+                });
+            }
+            if (previewContent) {
+                previewContent.addEventListener('scroll', () => {
+                    scheduleCommitHistory();
+                }, { passive: true });
+                previewContent.addEventListener('mousedown', () => {
+                    commitHistoryIfNeeded();
+                });
+            }
             function focusSearchInput() {
                 searchInput.focus();
                 searchInput.select();
@@ -334,6 +465,7 @@ export class SearchModal {
                             type: 'search',
                             query: query,
                             searchId: currentSearchId,
+                            searchAllFiles: !!searchAllFiles,
                             excludePatterns: excludeEnabled ? excludePatterns : []
                         });
                     } else if (!searchInitialized && query.length >= 2) {
@@ -406,12 +538,14 @@ export class SearchModal {
             }
             
             function updateResultsCount(count) {
+                currentResultsCount = count;
                 if (resultsCount) {
                     resultsCount.textContent = count > 0 ? \`\${count} result\${count === 1 ? '' : 's'}\` : '';
                 }
             }
             
             function selectFile(result) {
+                commitHistoryIfNeeded();
                 vscode.postMessage({
                     type: 'selectFile',
                     filePath: result.filePath,
@@ -421,6 +555,7 @@ export class SearchModal {
             }
             
             function openCurrentFile() {
+                commitHistoryIfNeeded();
                 if (currentResults[selectedIndex]) {
                     vscode.postMessage({
                         type: 'openFile',
@@ -470,6 +605,7 @@ export class SearchModal {
                             type: 'search',
                             query: lastQuery,
                             searchId: currentSearchId,
+                            searchAllFiles: !!searchAllFiles,
                             excludePatterns: excludeEnabled ? excludePatterns : []
                         });
                     }
@@ -482,10 +618,108 @@ export class SearchModal {
                     clearPreview();
                 } else if (message.type === 'focusSearch') {
                     focusSearchInput();
+                } else if (message.type === 'historyLoaded') {
+                    history = message.history || [];
+                    initialQuery = message.initialQuery || '';
+                    if (typeof message.initialSearchAllFiles === 'boolean') {
+                        searchAllFiles = message.initialSearchAllFiles;
+                        if (searchAllFilesToggle) {
+                            searchAllFilesToggle.checked = !!searchAllFiles;
+                        }
+                    }
+                    if (initialQuery && !searchInput.value) {
+                        setQueryInInput(initialQuery);
+                        // Select all so it's easy to overwrite
+                        try { searchInput.select(); } catch (e) {}
+                    }
+
+                    // Force the UI to refresh immediately (otherwise it may only update after the user types).
+                    try { searchInput.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+                    try { renderHistory(searchInput.value || ''); } catch (e) {}
+                } else if (message.type === 'historyUpdated') {
+                    history = message.history || [];
+
+                    // If the dropdown is open / the box is focused, refresh it.
+                    try { renderHistory(searchInput.value || ''); } catch (e) {}
                 } else if (message.type === 'excludePatternsLoaded') {
                     loadExcludePatterns(message.data);
                 }
             });
+
+            function escapeHtml(s) {
+                return (s ?? '').replace(/[&<>"']/g, c => ({
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    '"': '&quot;',
+                    "'": '&#39;'
+                }[c]));
+            }
+
+            function renderHistory(filterText = '') {
+                if (!historyDropdown) return;
+
+                const ft = (filterText || '').toLowerCase();
+                const items = (history || []).filter(q => (q || '').toLowerCase().includes(ft)).slice(0, 20);
+
+                if (!items.length) {
+                    historyDropdown.classList.add('hidden');
+                    historyDropdown.innerHTML = '';
+                    return;
+                }
+
+                historyDropdown.innerHTML = items.map(q =>
+                    '<div class="history-item" data-q="' + escapeHtml(q) + '">' + escapeHtml(q) + '</div>'
+                ).join('');
+
+                historyDropdown.classList.remove('hidden');
+            }
+
+            function hideHistory() {
+                if (!historyDropdown) return;
+                historyDropdown.classList.add('hidden');
+            }
+
+            function setQueryInInput(q) {
+                const query = (q ?? '').toString();
+                searchInput.value = query;
+                lastQuery = query;
+            }
+
+            if (historyDropdown) {
+                historyDropdown.addEventListener('mousedown', (e) => {
+                    const item = e.target.closest('.history-item');
+                    if (!item) return;
+                    const q = item.getAttribute('data-q') || '';
+                    setQueryInInput(q);
+                    // Trigger the same path as typing so results refresh immediately
+                    try { searchInput.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+                    hideHistory();
+
+                    // Put cursor at end (feels natural)
+                    requestAnimationFrame(() => {
+                        searchInput.focus();
+                        searchInput.selectionStart = searchInput.selectionEnd = searchInput.value.length;
+                    });
+                });
+            }
+
+            searchInput.addEventListener('focus', () => {
+                renderHistory(searchInput.value);
+            });
+
+            searchInput.addEventListener('input', () => {
+                renderHistory(searchInput.value);
+            });
+
+            document.addEventListener('mousedown', (e) => {
+                if (!historyDropdown) return;
+                if (e.target === searchInput) return;
+                if (historyDropdown.contains(e.target)) return;
+                hideHistory();
+            });
+
+
             
 
             
@@ -528,6 +762,7 @@ export class SearchModal {
             }
             
             function performNewSearch() {
+                hideHistory();
                 if (!isSearching && searchInitialized && lastQuery.length >= 2) {
                     resultsContainer.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><div class="loading-text">Searching...</div></div>';
                     updateResultsCount(0);
@@ -537,6 +772,7 @@ export class SearchModal {
                         type: 'search',
                         query: lastQuery,
                         searchId: currentSearchId,
+                            searchAllFiles: !!searchAllFiles,
                         excludePatterns: excludeEnabled ? excludePatterns : []
                     });
                 }
@@ -776,6 +1012,37 @@ export class SearchModal {
                     display: flex;
                     align-items: center;
                 }
+
+                .history-dropdown {
+                    position: absolute;
+                    top: calc(100% + 6px);
+                    left: 0;
+                    right: 0;
+                    max-height: 220px;
+                    overflow: auto;
+                    border: 1px solid var(--vscode-editorWidget-border);
+                    background: var(--vscode-editorWidget-background);
+                    border-radius: 6px;
+                    z-index: 1000;
+                    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+                }
+
+                .history-dropdown.hidden {
+                    display: none;
+                }
+
+                .history-item {
+                    padding: 8px 10px;
+                    cursor: pointer;
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                }
+
+                .history-item:hover {
+                    background: var(--vscode-list-hoverBackground);
+                }
+
                 
                 .search-controls {
                     display: flex;
@@ -1255,6 +1522,7 @@ export class SearchModal {
                     <div class="search-wrapper">
                         <div class="search-input-container">
                             <textarea class="search-input" placeholder="Search in files... (Shift+Enter for new line, Enter to open, Esc to close)" autofocus tabindex="0" rows="1"></textarea>
+                            <div class="history-dropdown hidden" id="historyDropdown"></div>
                             <button class="case-sensitive-btn" type="button">
                                 <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor">
                                     <path d="M8.854 11.702h-1.18L7.4 10.4H4.6l-.274 1.302H3.146L5.734 5.2h1.132l2.588 6.502zM7.1 9.402L6.014 6.4h-.028L4.9 9.402H7.1z"/>
@@ -1264,6 +1532,10 @@ export class SearchModal {
                             </button>
                         </div>
                         <div class="search-controls">
+                            <label class="scope-label">
+                                <input type="checkbox" id="searchAllFilesToggle" />
+                                <span>Search in All Files</span>
+                            </label>
                             <div class="results-count"></div>
                         </div>
                     </div>

@@ -77,3 +77,8 @@ Now you can use default VS Code's native `Cmd+Shift+F` / `Ctrl+Shift+F` shortcut
 3. Use arrow keys (↑/↓) to navigate through results
 4. Press `Enter` to open the selected file
 5. Press `Escape` to close the search modal
+
+### Compilation
+
+- npm install --save-dev @types/vscode
+- yes | npx @vscode/vsce@latest package
