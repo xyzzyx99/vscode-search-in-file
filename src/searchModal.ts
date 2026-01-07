@@ -428,6 +428,7 @@ export class SearchModal {
             }
             
             const caseSensitiveBtn = document.querySelector('.case-sensitive-btn');
+            const historyToggleBtn = document.querySelector('.history-toggle-btn');
             const excludeInput = document.querySelector('.exclude-input');
             const excludeToggleBtn = document.querySelector('.exclude-toggle-btn');
             
@@ -462,6 +463,14 @@ export class SearchModal {
             caseSensitiveBtn.addEventListener('click', () => {
                 vscode.postMessage({ type: 'toggleCaseSensitive' });
             });
+
+            if (historyToggleBtn) {
+                historyToggleBtn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    toggleHistory();
+                });
+            }
             
             excludeToggleBtn.addEventListener('click', () => {
                 excludeEnabled = !excludeEnabled;
@@ -725,28 +734,68 @@ export class SearchModal {
             }
 
             function renderHistory(filterText = '') {
-                if (!historyDropdown) return;
+    if (!historyDropdown) return;
 
-                const ft = (filterText || '').toLowerCase();
-                const items = (history || []).filter(q => (q || '').toLowerCase().includes(ft)).slice(0, 20);
+    const raw = (history || []);
+    const ft = (filterText || '').toLowerCase();
 
-                if (!items.length) {
-                    historyDropdown.classList.add('hidden');
-                    historyDropdown.innerHTML = '';
-                    return;
-                }
+    // If there is no filter text, show newest -> oldest without highlighting.
+    let ordered = [];
+    let matchSet = new Set();
 
-                historyDropdown.innerHTML = items.map(q =>
-                    '<div class="history-item" data-q="' + escapeHtml(q) + '">' + escapeHtml(q) + '</div>'
-                ).join('');
-
-                historyDropdown.classList.remove('hidden');
+    if (!ft) {
+        ordered = raw.slice(0, 50);
+    } else {
+        const matches = [];
+        const nonMatches = [];
+        for (const q of raw) {
+            const qq = (q || '').toLowerCase();
+            if (qq.includes(ft)) {
+                matches.push(q);
+                matchSet.add(q);
+            } else {
+                nonMatches.push(q);
             }
+        }
+        // Keep newest -> oldest within each group (raw is already newest first)
+        ordered = matches.concat(nonMatches).slice(0, 50);
+    }
 
-            function hideHistory() {
-                if (!historyDropdown) return;
-                historyDropdown.classList.add('hidden');
-            }
+    if (!ordered.length) {
+        historyDropdown.innerHTML = '';
+        historyDropdown.classList.add('hidden');
+        return;
+    }
+
+    historyDropdown.innerHTML = ordered.map(q => {
+        const isMatch = ft && ((q || '').toLowerCase().includes(ft));
+        const cls = isMatch ? 'history-item match' : 'history-item';
+        return '<div class="' + cls + '" data-q="' + escapeHtml(q) + '">' + escapeHtml(q) + '</div>';
+    }).join('');
+}
+
+            let historyOpen = false;
+
+function showHistory() {
+    if (!historyDropdown) return;
+    historyOpen = true;
+    historyDropdown.classList.remove('hidden');
+    if (historyToggleBtn) historyToggleBtn.classList.add('open');
+    renderHistory(searchInput.value || '');
+}
+
+function hideHistory() {
+    if (!historyDropdown) return;
+    historyOpen = false;
+    historyDropdown.classList.add('hidden');
+    if (historyToggleBtn) historyToggleBtn.classList.remove('open');
+}
+
+function toggleHistory() {
+    if (historyOpen) hideHistory();
+    else showHistory();
+}
+
 
             function setQueryInInput(q) {
                 const query = (q ?? '').toString();
@@ -796,11 +845,11 @@ export class SearchModal {
             }
 
             searchInput.addEventListener('focus', () => {
-                renderHistory(searchInput.value);
+                if (historyOpen) renderHistory(searchInput.value);
             });
 
             searchInput.addEventListener('input', () => {
-                renderHistory(searchInput.value);
+                if (historyOpen) renderHistory(searchInput.value);
             });
 
             document.addEventListener('mousedown', (e) => {
@@ -1134,6 +1183,15 @@ export class SearchModal {
                     background: var(--vscode-list-hoverBackground);
                 }
 
+                .history-item.match {
+                    background: var(--vscode-editorWidget-foreground);
+                    color: var(--vscode-editorWidget-background);
+                }
+
+                .history-item.match:hover {
+                    filter: brightness(0.95);
+                }
+
                 
                 .search-controls {
                     display: flex;
@@ -1220,7 +1278,7 @@ export class SearchModal {
                 
                 .case-sensitive-btn {
                     position: absolute;
-                    right: 8px;
+                    right: 32px;
                     top: 50%;
                     transform: translateY(-50%);
                     display: flex;
@@ -1236,6 +1294,34 @@ export class SearchModal {
                     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
                     opacity: 0.7;
                     z-index: 10;
+                }
+
+                .history-toggle-btn {
+                    position: absolute;
+                    right: 8px;
+                    top: 50%;
+                    transform: translateY(-50%);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 2px;
+                    background: transparent;
+                    border: none;
+                    color: var(--vscode-foreground);
+                    cursor: pointer;
+                    opacity: 0.75;
+                }
+
+                .history-toggle-btn:hover {
+                    opacity: 1;
+                }
+
+                .history-toggle-btn.open svg {
+                    transform: rotate(180deg);
+                }
+
+                .history-toggle-btn svg {
+                    transition: transform 120ms ease;
                 }
                 
                 .case-sensitive-btn:hover {
@@ -1301,7 +1387,7 @@ export class SearchModal {
                 
                 .search-input {
                     width: 100%;
-                    padding: 4px 40px 4px 12px;
+                    padding: 4px 64px 4px 12px;
                     background: var(--vscode-input-background);
                     color: var(--vscode-input-foreground);
                     border: 1px solid var(--vscode-input-border);
@@ -1620,6 +1706,11 @@ export class SearchModal {
                                     <path d="M12.314 11.702h-.992l-.274-.302c-.284.268-.68.402-1.188.402-.396 0-.734-.114-1.014-.342-.28-.228-.42-.532-.42-.912 0-.424.168-.754.504-1.004C9.264 9.284 9.714 9.16 10.3 9.16h1.014v-.158c0-.256-.07-.448-.21-.576-.14-.128-.35-.192-.63-.192-.224 0-.406.048-.546.144-.14.096-.21.228-.21.396h-.994c0-.268.094-.504.282-.708.188-.204.434-.358.738-.462.304-.104.628-.156.972-.156.608 0 1.092.148 1.452.444.36.296.54.724.54 1.284v2.688zm-1.008-.84v-.588H10.3c-.308 0-.532.06-.672.18-.14.12-.21.274-.21.462 0 .168.054.302.162.402.108.1.258.15.45.15.216 0 .402-.068.558-.204.156-.136.234-.31.234-.522z"/>
                                 </svg>
                                 <div class="tooltip">Case Sensitive</div>
+                            </button>
+                            <button class="history-toggle-btn" type="button" title="Show history">
+                                <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                    <path d="M4.47 6.47a.75.75 0 0 1 1.06 0L8 8.94l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06z"/>
+                                </svg>
                             </button>
                         </div>
                         <div class="search-controls">
